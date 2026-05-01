@@ -13,6 +13,11 @@ export type CustomerConfig = {
   customers: Record<string, {
     aliases: string[];
     slackChannels: string[];
+    people?: Record<string, {
+      aliases: string[];
+      roles?: string[];
+      slackUserIds?: string[];
+    }>;
   }>;
 };
 

@@ -1,41 +1,35 @@
 import "dotenv/config";
-import { App } from "@slack/bolt";
-import { answerLewisQuestion } from "./agent";
+import { createLarkConnector } from "./connectors/lark.js";
+import { createSlackConnector } from "./connectors/slack.js";
+import { createTelegramConnector } from "./connectors/telegram.js";
+import type { ConnectorName, Connector } from "./connectors/types.js";
+import { createWhatsAppConnector } from "./connectors/whatsapp.js";
 
-const app = new App({
-  token: process.env.SLACK_BOT_TOKEN,
-  appToken: process.env.SLACK_APP_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: true
-});
+function enabledConnectorNames(): ConnectorName[] {
+  const raw = process.env.MIA_CONNECTORS || "slack";
+  return raw
+    .split(",")
+    .map(name => name.trim())
+    .filter((name): name is ConnectorName => ["slack", "lark", "whatsapp", "telegram"].includes(name));
+}
 
-app.message(async ({ message, say }) => {
-  if (!("text" in message) || !message.text) return;
-  if ("subtype" in message && message.subtype) return;
-  if (!("channel" in message) || !message.channel) return;
-  if (!("ts" in message) || !message.ts) return;
-
-  const text = message.text;
-  const botUserId = process.env.SLACK_BOT_USER_ID;
-
-  const mentioned = botUserId ? text.includes(`<@${botUserId}>`) : true;
-  if (!mentioned) return;
-
-  const cleanedText = botUserId
-    ? text.replace(`<@${botUserId}>`, "").trim()
-    : text.trim();
-
-  const reply = await answerLewisQuestion(cleanedText);
-
-  await say({
-    text: reply || "Mia 没有找到足够上下文。",
-    thread_ts: "thread_ts" in message && message.thread_ts ? message.thread_ts : message.ts
-  });
-});
+function createConnector(name: ConnectorName): Connector {
+  switch (name) {
+    case "slack":
+      return createSlackConnector();
+    case "lark":
+      return createLarkConnector();
+    case "whatsapp":
+      return createWhatsAppConnector();
+    case "telegram":
+      return createTelegramConnector();
+  }
+}
 
 async function main() {
-  await app.start();
-  console.log("bytedance-mia Slack bot is running in Socket Mode.");
+  const connectors = enabledConnectorNames().map(createConnector);
+  await Promise.all(connectors.map(connector => connector.start()));
+  console.log(`bytedance-mia started connectors: ${connectors.map(connector => connector.name).join(", ")}`);
 }
 
 main().catch((error) => {
