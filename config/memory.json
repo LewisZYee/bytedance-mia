@@ -1,0 +1,11 @@
+{
+  "lewis": {
+    "name": "Lewis",
+    "role": "ByteDance AI Solution Architect"
+  },
+  "agent": {
+    "name": "bytedance-mia",
+    "role": "private customer context secretary"
+  },
+  "customers": {}
+}

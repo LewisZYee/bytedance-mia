@@ -1,0 +1,8 @@
+{
+  "slack": {
+    "allowedChannelIds": ["*"],
+    "respondWhenMentioned": true,
+    "recordAllMessagesInJoinedChannels": true,
+    "autoReplyToCustomerChannels": false
+  }
+}
