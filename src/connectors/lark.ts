@@ -1,201 +1,137 @@
-import http from "node:http";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { answerLewisQuestion } from "../agent.js";
-import { requireEnv } from "../runtime/env.js";
 import type { Connector } from "./types.js";
 
-type LarkEventBody = {
-  type?: string;
-  challenge?: string;
-  token?: string;
-  encrypt?: string;
-  header?: {
-    event_type?: string;
-    token?: string;
-  };
-  event?: {
-    sender?: {
-      sender_id?: {
-        open_id?: string;
-        user_id?: string;
-      };
-      sender_type?: string;
-    };
-    message?: {
-      message_id?: string;
-      chat_id?: string;
-      chat_type?: string;
-      message_type?: string;
-      content?: string;
-    };
-  };
+type LarkReceiveEvent = {
+  message_id?: string;
+  chat_id?: string;
+  chat_type?: string;
+  message_type?: string;
+  content?: string;
+  sender_id?: string;
+  sender_type?: string;
 };
 
-type TenantTokenCache = {
-  token: string;
-  expiresAtMs: number;
-};
-
-let tenantTokenCache: TenantTokenCache | undefined;
-
-function larkBaseUrl() {
-  return process.env.LARK_BASE_URL || "https://open.larksuite.com/open-apis";
+function larkCliPath() {
+  return process.env.LARK_CLI_PATH || "lark-cli";
 }
 
-function eventPort() {
-  return Number(process.env.LARK_EVENT_PORT || 3001);
+function privateOnly() {
+  return process.env.LARK_PRIVATE_ONLY !== "false";
 }
 
-function verifyToken(body: LarkEventBody) {
-  const expected = process.env.LARK_VERIFICATION_TOKEN;
-  if (!expected) return true;
-  return body.token === expected || body.header?.token === expected;
-}
-
-function parseTextContent(content?: string) {
-  if (!content) return "";
+function parseEvent(line: string): LarkReceiveEvent | undefined {
   try {
-    const parsed = JSON.parse(content) as { text?: string };
-    return parsed.text?.trim() ?? "";
+    return JSON.parse(line) as LarkReceiveEvent;
   } catch {
-    return "";
+    console.warn("[lark] skipped non-json event line", line);
+    return undefined;
   }
 }
 
-async function readJsonBody(request: http.IncomingMessage) {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return JSON.parse(raw) as LarkEventBody;
-}
-
-function sendJson(response: http.ServerResponse, statusCode: number, payload: unknown) {
-  response.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
-  response.end(JSON.stringify(payload));
-}
-
-async function getTenantAccessToken() {
-  if (tenantTokenCache && tenantTokenCache.expiresAtMs > Date.now() + 60_000) {
-    return tenantTokenCache.token;
-  }
-
-  const response = await fetch(`${larkBaseUrl()}/auth/v3/tenant_access_token/internal`, {
-    method: "POST",
-    headers: { "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({
-      app_id: requireEnv("LARK_APP_ID"),
-      app_secret: requireEnv("LARK_APP_SECRET")
-    })
-  });
-
-  const data = await response.json() as {
-    code?: number;
-    msg?: string;
-    tenant_access_token?: string;
-    expire?: number;
-  };
-
-  if (!response.ok || data.code !== 0 || !data.tenant_access_token) {
-    throw new Error(`Failed to get Lark tenant access token: ${data.msg || response.statusText}`);
-  }
-
-  tenantTokenCache = {
-    token: data.tenant_access_token,
-    expiresAtMs: Date.now() + (data.expire ?? 7200) * 1000
-  };
-
-  return tenantTokenCache.token;
+function shouldHandleEvent(event: LarkReceiveEvent) {
+  if (!event.message_id || !event.content) return false;
+  if (event.message_type !== "text") return false;
+  if (privateOnly() && event.chat_type !== "p2p") return false;
+  if (event.sender_type === "app" || event.sender_type === "bot") return false;
+  return true;
 }
 
 async function replyToMessage(messageId: string, text: string) {
-  const token = await getTenantAccessToken();
-  const response = await fetch(`${larkBaseUrl()}/im/v1/messages/${messageId}/reply`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json; charset=utf-8"
-    },
-    body: JSON.stringify({
-      msg_type: "text",
-      content: JSON.stringify({ text })
-    })
-  });
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(larkCliPath(), [
+      "im",
+      "+messages-reply",
+      "--message-id",
+      messageId,
+      "--text",
+      text,
+      "--as",
+      "bot"
+    ], {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
 
-  const data = await response.json() as { code?: number; msg?: string };
-  if (!response.ok || data.code !== 0) {
-    throw new Error(`Failed to reply to Lark message: ${data.msg || response.statusText}`);
-  }
+    let stderr = "";
+    child.stderr.on("data", chunk => {
+      stderr += String(chunk);
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`lark-cli reply failed with code ${code}: ${stderr.trim()}`));
+    });
+  });
 }
 
-async function handleLarkEvent(body: LarkEventBody) {
-  if (body.encrypt) {
-    throw new Error("Encrypted Lark events are not supported yet. Disable encryption or implement LARK_ENCRYPT_KEY handling.");
-  }
-
-  if (!verifyToken(body)) {
-    throw new Error("Invalid Lark verification token.");
-  }
-
-  if (body.type === "url_verification" && body.challenge) {
-    return { challenge: body.challenge };
-  }
-
-  if (body.header?.event_type !== "im.message.receive_v1") {
-    return {};
-  }
-
-  const message = body.event?.message;
-  if (!message?.message_id || !message.chat_id) return {};
-  if (message.message_type !== "text") return {};
-
-  const privateOnly = process.env.LARK_PRIVATE_ONLY !== "false";
-  if (privateOnly && message.chat_type !== "p2p") return {};
-
-  const text = parseTextContent(message.content);
-  if (!text) return {};
+async function handleEvent(event: LarkReceiveEvent) {
+  if (!shouldHandleEvent(event)) return;
 
   const reply = await answerLewisQuestion({
-    text,
+    text: event.content ?? "",
     source: "lark",
-    conversationId: message.chat_id,
-    threadId: message.message_id,
-    ...(body.event?.sender?.sender_id?.open_id ? { userId: body.event.sender.sender_id.open_id } : {})
+    ...(event.chat_id ? { conversationId: event.chat_id } : {}),
+    ...(event.message_id ? { threadId: event.message_id } : {}),
+    ...(event.sender_id ? { userId: event.sender_id } : {})
   });
 
-  await replyToMessage(message.message_id, reply.text || "Mia 没有找到足够上下文。");
-  return {};
+  await replyToMessage(event.message_id!, reply.text || "Mia 没有找到足够上下文。");
 }
 
 export function createLarkConnector(): Connector {
   return {
     name: "lark",
     async start() {
-      requireEnv("LARK_APP_ID");
-      requireEnv("LARK_APP_SECRET");
+      const child = spawn(larkCliPath(), [
+        "event",
+        "consume",
+        "im.message.receive_v1",
+        "--as",
+        "bot"
+      ], {
+        stdio: ["pipe", "pipe", "pipe"]
+      });
 
-      const server = http.createServer((request, response) => {
+      child.on("error", (error) => {
+        console.error("[lark] event consumer failed to start", error);
+      });
+
+      child.on("close", (code) => {
+        console.error(`[lark] event consumer exited with code ${code}`);
+      });
+
+      const stdout = createInterface({ input: child.stdout });
+      stdout.on("line", (line) => {
         void (async () => {
-          if (request.method !== "POST" || request.url !== "/lark/events") {
-            sendJson(response, 404, { ok: false, error: "not_found" });
-            return;
-          }
-
-          const body = await readJsonBody(request);
-          const result = await handleLarkEvent(body);
-          sendJson(response, 200, result);
-        })().catch((error) => {
+          const event = parseEvent(line);
+          if (event) await handleEvent(event);
+        })().catch(error => {
           console.error("[lark] event handling failed", error);
-          sendJson(response, 500, { ok: false });
         });
       });
 
-      await new Promise<void>((resolve) => {
-        server.listen(eventPort(), "0.0.0.0", resolve);
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error("Timed out waiting for lark-cli event consumer readiness."));
+        }, 30_000);
+
+        const stderr = createInterface({ input: child.stderr });
+        stderr.on("line", (line) => {
+          console.info(`[lark] ${line}`);
+          if (line.includes("[event] ready")) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
       });
 
-      console.log(`bytedance-mia Lark connector is listening on /lark/events port ${eventPort()}.`);
+      console.log("bytedance-mia Lark connector is consuming im.message.receive_v1 via lark-cli.");
     }
   };
 }
