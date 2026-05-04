@@ -8,6 +8,7 @@
     "dev": "tsx src/index.ts",
     "ask": "tsx src/cli/ask.ts",
     "ask:debug": "tsx src/cli/ask.ts --debug",
+    "lark:auth": "tsx src/cli/larkAuth.ts",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck"
   },

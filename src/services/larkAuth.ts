@@ -15,7 +15,7 @@ type StoredUserToken = {
   refresh_expires_at?: number;
 };
 
-function tokenFilePath() {
+export function larkUserTokenFilePath() {
   return process.env.LARK_USER_TOKEN_FILE || ".lark-user-token.json";
 }
 
@@ -28,17 +28,17 @@ async function readStoredToken(): Promise<StoredUserToken> {
   }
 
   try {
-    const raw = await readFile(tokenFilePath(), "utf8");
+    const raw = await readFile(larkUserTokenFilePath(), "utf8");
     return JSON.parse(raw) as StoredUserToken;
   } catch {
     return {};
   }
 }
 
-async function writeStoredToken(token: StoredUserToken) {
+export async function writeLarkUserToken(token: StoredUserToken) {
   if (process.env.LARK_USER_ACCESS_TOKEN) return;
 
-  await writeFile(tokenFilePath(), `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(larkUserTokenFilePath(), `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
 }
 
 function shouldRefresh(token: StoredUserToken) {
@@ -78,6 +78,36 @@ export async function getLarkUserAccessToken() {
     ...(response.data?.refresh_expires_in ? { refresh_expires_at: now + response.data.refresh_expires_in } : {})
   };
 
-  await writeStoredToken(refreshed);
+  await writeLarkUserToken(refreshed);
   return accessToken;
+}
+
+export async function exchangeLarkAuthCode(code: string) {
+  const client = createLarkClient();
+  const response = await client.authen.accessToken.create({
+    data: {
+      grant_type: "authorization_code",
+      code
+    }
+  });
+
+  assertLarkOk(response);
+
+  const accessToken = response.data?.access_token;
+  if (!accessToken) throw new LarkUserAuthRequiredError();
+
+  const now = Math.floor(Date.now() / 1000);
+  const token: StoredUserToken = {
+    access_token: accessToken,
+    ...(response.data?.refresh_token ? { refresh_token: response.data.refresh_token } : {}),
+    ...(response.data?.expires_in ? { expires_at: now + response.data.expires_in } : {}),
+    ...(response.data?.refresh_expires_in ? { refresh_expires_at: now + response.data.refresh_expires_in } : {})
+  };
+
+  await writeLarkUserToken(token);
+
+  return {
+    token,
+    filePath: larkUserTokenFilePath()
+  };
 }
