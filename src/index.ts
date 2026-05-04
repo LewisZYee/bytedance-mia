@@ -1,5 +1,4 @@
 import "dotenv/config";
-import { createLarkConnector } from "./connectors/lark.js";
 import { createSlackConnector } from "./connectors/slack.js";
 import { createTelegramConnector } from "./connectors/telegram.js";
 import type { ConnectorName, Connector } from "./connectors/types.js";
@@ -13,12 +12,12 @@ function enabledConnectorNames(): ConnectorName[] {
     .filter((name): name is ConnectorName => ["slack", "lark", "whatsapp", "telegram"].includes(name));
 }
 
-function createConnector(name: ConnectorName): Connector {
+async function createConnector(name: ConnectorName): Promise<Connector> {
   switch (name) {
     case "slack":
       return createSlackConnector();
     case "lark":
-      return createLarkConnector();
+      return (await import("./connectors/lark.js")).createLarkConnector();
     case "whatsapp":
       return createWhatsAppConnector();
     case "telegram":
@@ -27,7 +26,7 @@ function createConnector(name: ConnectorName): Connector {
 }
 
 async function main() {
-  const connectors = enabledConnectorNames().map(createConnector);
+  const connectors = await Promise.all(enabledConnectorNames().map(createConnector));
   await Promise.all(connectors.map(connector => connector.start()));
   console.log(`bytedance-mia started connectors: ${connectors.map(connector => connector.name).join(", ")}`);
 }

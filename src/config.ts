@@ -28,3 +28,7 @@ export function loadCustomers() {
 export function loadSystemPrompt() {
   return readTextFile("prompts/system.md");
 }
+
+export function loadPlannerPrompt() {
+  return readTextFile("prompts/planner.md");
+}

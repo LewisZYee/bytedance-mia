@@ -1,22 +1,39 @@
 import { generateText } from "./services/llm.js";
 import { makeRetrievalPlan, filterFocusedMessages, type RetrievalPlan } from "./retrieval/planner.js";
-import { formatLarkContext, LarkSkillNotConfiguredError, searchLarkChatHistory, searchLarkMinutes } from "./skills/lark.js";
+import { makeModelRetrievalPlan, type ModelRetrievalPlan } from "./retrieval/modelPlanner.js";
 import { fetchChannelHistory, formatSlackMessages, SlackContextError } from "./skills/slack.js";
 import { loadCustomers, loadSystemPrompt } from "./config.js";
 import type { AgentReply, AgentRequest } from "./connectors/types.js";
 
 export type AgentDebugInfo = {
   plan: RetrievalPlan;
+  modelPlan: ModelRetrievalPlan;
   retrievalNotes: string[];
 };
+
+function isExpectedLarkError(error: unknown) {
+  return error instanceof Error && [
+    "LarkNotConfiguredError",
+    "LarkSkillNotConfiguredError",
+    "LarkUserAuthRequiredError"
+  ].includes(error.name);
+}
 
 export async function answerLewisQuestionWithDebug(request: string | AgentRequest) {
   const agentRequest = typeof request === "string" ? { text: request, source: "cli" as const } : request;
   const userText = agentRequest.text;
   const plan = makeRetrievalPlan(userText, loadCustomers());
+  const modelPlan = await makeModelRetrievalPlan(userText);
+  const larkTools = {
+    chat: plan.larkTools.chat || modelPlan.useLarkChat,
+    minutes: plan.larkTools.minutes || modelPlan.useLarkMinutes,
+    docs: plan.larkTools.docs || modelPlan.useLarkDocs
+  };
+  const needsLarkContext = plan.needsLarkContext || larkTools.chat || larkTools.minutes || larkTools.docs;
+  const larkSearchQuery = modelPlan.searchQuery || userText;
 
   const chunks: string[] = [];
-  const retrievalNotes: string[] = [];
+  const retrievalNotes: string[] = [`Model planner: ${modelPlan.reason}`];
 
   for (const channel of plan.channels) {
     try {
@@ -52,15 +69,23 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
     }
   }
 
-  if (plan.needsLarkContext) {
+  if (needsLarkContext) {
     try {
-      const [chatMessages, minutes] = await Promise.all([
-        searchLarkChatHistory({ query: userText, limit: 30 }),
-        searchLarkMinutes({ query: userText, limit: 10 })
-      ]);
-      const larkItems = [...chatMessages, ...minutes];
+      const {
+        formatLarkContext,
+        searchLarkChatHistory,
+        searchLarkDocs,
+        searchLarkMinutes
+      } = await import("./skills/lark.js");
 
-      retrievalNotes.push(`Lark: ${larkItems.length} items`);
+      const [chatMessages, minutes, docs] = await Promise.all([
+        larkTools.chat ? searchLarkChatHistory({ query: larkSearchQuery, limit: 30, ...(plan.oldest ? { oldest: plan.oldest } : {}) }) : Promise.resolve([]),
+        larkTools.minutes ? searchLarkMinutes({ query: larkSearchQuery, limit: 10, ...(plan.oldest ? { oldest: plan.oldest } : {}) }) : Promise.resolve([]),
+        larkTools.docs ? searchLarkDocs({ query: larkSearchQuery, limit: 10, ...(plan.oldest ? { oldest: plan.oldest } : {}) }) : Promise.resolve([])
+      ]);
+      const larkItems = [...chatMessages, ...minutes, ...docs];
+
+      retrievalNotes.push(`Lark: ${larkItems.length} items (chat=${larkTools.chat}, minutes=${larkTools.minutes}, docs=${larkTools.docs})`);
       if (larkItems.length > 0) {
         chunks.push([
           "Lark context:",
@@ -68,8 +93,8 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
         ].join("\n"));
       }
     } catch (error) {
-      if (error instanceof LarkSkillNotConfiguredError) {
-        retrievalNotes.push(`Lark: not configured (${error.message})`);
+      if (isExpectedLarkError(error)) {
+        retrievalNotes.push(`Lark: unavailable (${(error as Error).message})`);
       } else {
         throw error;
       }
@@ -86,7 +111,9 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
     `Person aliases: ${plan.personAliases.join(", ") || "(none)"}`,
     `Person Slack user IDs: ${plan.personSlackUserIds.join(", ") || "(none)"}`,
     `Needs person mapping: ${plan.needsPersonMapping ? "yes" : "no"}`,
-    `Needs Lark context: ${plan.needsLarkContext ? "yes" : "no"}`,
+    `Needs Lark context: ${needsLarkContext ? "yes" : "no"}`,
+    `Lark tools: chat=${larkTools.chat}, minutes=${larkTools.minutes}, docs=${larkTools.docs}`,
+    `Lark search query: ${larkSearchQuery}`,
     `Guidance: ${plan.guidance}`
   ].join("\n");
 
@@ -99,7 +126,9 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
     personAliases: plan.personAliases,
     personSlackUserIds: plan.personSlackUserIds,
     needsPersonMapping: plan.needsPersonMapping,
-    needsLarkContext: plan.needsLarkContext
+    needsLarkContext,
+    larkTools,
+    modelPlan
   }));
   console.info("[mia] retrieval notes", retrievalNotes.join(" | ") || "none");
 
@@ -142,6 +171,7 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
     reply,
     debug: {
       plan,
+      modelPlan,
       retrievalNotes
     }
   };

@@ -1,5 +1,6 @@
 node_modules/
 .env
+.lark-user-token.json
 data/
 *.sqlite
 *.sqlite-shm

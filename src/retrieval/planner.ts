@@ -18,6 +18,11 @@ export type RetrievalPlan = {
   personSlackUserIds: string[];
   needsPersonMapping: boolean;
   needsLarkContext: boolean;
+  larkTools: {
+    chat: boolean;
+    minutes: boolean;
+    docs: boolean;
+  };
   guidance: string;
 };
 
@@ -163,7 +168,17 @@ function includesAny(text: string, keywords: string[]) {
 }
 
 function shouldSearchLark(text: string) {
-  return /(lark|飞书|文档|doc|docs|会议|纪要|妙记|minutes|meeting|transcript)/i.test(text);
+  return /(lark|飞书|文档|doc|docs|会议|纪要|妙记|minutes|meeting|transcript|聊天记录|群聊|私聊)/i.test(text);
+}
+
+function larkToolHints(text: string) {
+  const lower = text.toLowerCase();
+
+  return {
+    chat: /(lark|飞书|聊天记录|群聊|私聊|消息|message|chat)/i.test(text),
+    minutes: /(会议|纪要|妙记|minutes|meeting|transcript|录音|总结|待办)/i.test(text),
+    docs: /(文档|doc|docs|wiki|知识库|prd|spec|report|报告|方案|资料)/i.test(lower)
+  };
 }
 
 export function makeRetrievalPlan(userText: string, config: CustomerConfig): RetrievalPlan {
@@ -175,6 +190,7 @@ export function makeRetrievalPlan(userText: string, config: CustomerConfig): Ret
   ])];
   const people = resolvePeople(userText, customers);
   const todayOldest = oldestIfToday(userText);
+  const larkTools = larkToolHints(userText);
 
   return {
     intent,
@@ -186,6 +202,7 @@ export function makeRetrievalPlan(userText: string, config: CustomerConfig): Ret
     personSlackUserIds: people.slackUserIds,
     needsPersonMapping: intent === "person_said" && people.needsPersonMapping,
     needsLarkContext: shouldSearchLark(userText),
+    larkTools,
     guidance: retrievalGuidance(intent)
   };
 }
