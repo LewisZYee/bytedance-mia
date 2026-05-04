@@ -21,6 +21,10 @@ type LarkMessageReceiveEvent = {
   };
 };
 
+const processedMessageIds = new Map<string, number>();
+const MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
+const MESSAGE_DEDUPE_MAX = 5000;
+
 function privateOnly() {
   return process.env.LARK_PRIVATE_ONLY !== "false";
 }
@@ -45,6 +49,27 @@ function shouldHandleEvent(event: LarkMessageReceiveEvent) {
   return true;
 }
 
+function rememberMessage(messageId: string) {
+  const now = Date.now();
+  const previous = processedMessageIds.get(messageId);
+
+  if (previous && now - previous < MESSAGE_DEDUPE_TTL_MS) {
+    return false;
+  }
+
+  processedMessageIds.set(messageId, now);
+
+  if (processedMessageIds.size > MESSAGE_DEDUPE_MAX) {
+    for (const [id, timestamp] of processedMessageIds) {
+      if (now - timestamp > MESSAGE_DEDUPE_TTL_MS || processedMessageIds.size > MESSAGE_DEDUPE_MAX) {
+        processedMessageIds.delete(id);
+      }
+    }
+  }
+
+  return true;
+}
+
 async function replyToMessage(messageId: string, text: string) {
   const client = createLarkClient();
   const response = await client.im.v1.message.reply({
@@ -66,6 +91,12 @@ async function replyToMessage(messageId: string, text: string) {
 async function handleMessage(event: LarkMessageReceiveEvent) {
   if (!shouldHandleEvent(event)) return;
 
+  const messageId = event.message!.message_id!;
+  if (!rememberMessage(messageId)) {
+    console.info(`[lark] skipped duplicate message event ${messageId}`);
+    return;
+  }
+
   const text = parseTextContent(event.message?.content);
   if (!text.trim()) return;
 
@@ -77,7 +108,7 @@ async function handleMessage(event: LarkMessageReceiveEvent) {
     ...(event.sender?.sender_id?.open_id ? { userId: event.sender.sender_id.open_id } : {})
   });
 
-  await replyToMessage(event.message!.message_id!, reply.text || "没有找到足够上下文。");
+  await replyToMessage(messageId, reply.text || "没有找到足够上下文。");
 }
 
 export function createLarkConnector(): Connector {
