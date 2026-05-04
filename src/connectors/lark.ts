@@ -4,6 +4,7 @@ import { createLarkClient, larkDomain, assertLarkAppConfigured } from "../servic
 import type { Connector } from "./types.js";
 
 type LarkMessageReceiveEvent = {
+  event_id?: string;
   sender?: {
     sender_id?: {
       open_id?: string;
@@ -14,6 +15,7 @@ type LarkMessageReceiveEvent = {
   };
   message?: {
     message_id?: string;
+    create_time?: string;
     chat_id?: string;
     chat_type?: string;
     message_type?: string;
@@ -22,8 +24,8 @@ type LarkMessageReceiveEvent = {
 };
 
 const processedMessageIds = new Map<string, number>();
-const MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_DEDUPE_MAX = 5000;
+const connectorStartedAt = Date.now();
 
 function privateOnly() {
   return process.env.LARK_PRIVATE_ONLY !== "false";
@@ -49,21 +51,38 @@ function shouldHandleEvent(event: LarkMessageReceiveEvent) {
   return true;
 }
 
+function eventMaxAgeMs() {
+  const raw = Number(process.env.LARK_EVENT_MAX_AGE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+}
+
+function larkTimestampMs(value?: string) {
+  if (!value) return undefined;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return undefined;
+  return numeric > 10_000_000_000 ? numeric : numeric * 1000;
+}
+
+function isStaleMessage(event: LarkMessageReceiveEvent) {
+  const createdAt = larkTimestampMs(event.message?.create_time);
+  if (!createdAt) return false;
+
+  const oldestAllowed = Math.min(Date.now(), connectorStartedAt) - eventMaxAgeMs();
+  return createdAt < oldestAllowed;
+}
+
 function rememberMessage(messageId: string) {
   const now = Date.now();
-  const previous = processedMessageIds.get(messageId);
-
-  if (previous && now - previous < MESSAGE_DEDUPE_TTL_MS) {
+  if (processedMessageIds.has(messageId)) {
     return false;
   }
 
   processedMessageIds.set(messageId, now);
 
   if (processedMessageIds.size > MESSAGE_DEDUPE_MAX) {
-    for (const [id, timestamp] of processedMessageIds) {
-      if (now - timestamp > MESSAGE_DEDUPE_TTL_MS || processedMessageIds.size > MESSAGE_DEDUPE_MAX) {
-        processedMessageIds.delete(id);
-      }
+    for (const id of processedMessageIds.keys()) {
+      processedMessageIds.delete(id);
+      if (processedMessageIds.size <= MESSAGE_DEDUPE_MAX) break;
     }
   }
 
@@ -92,8 +111,13 @@ async function handleMessage(event: LarkMessageReceiveEvent) {
   if (!shouldHandleEvent(event)) return;
 
   const messageId = event.message!.message_id!;
+  if (isStaleMessage(event)) {
+    console.info(`[lark] skipped stale message event ${messageId}${event.event_id ? ` event=${event.event_id}` : ""}`);
+    return;
+  }
+
   if (!rememberMessage(messageId)) {
-    console.info(`[lark] skipped duplicate message event ${messageId}`);
+    console.info(`[lark] skipped duplicate message event ${messageId}${event.event_id ? ` event=${event.event_id}` : ""}`);
     return;
   }
 
