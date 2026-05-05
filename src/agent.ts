@@ -1,7 +1,7 @@
 import { generateText } from "./services/llm.js";
 import { makeRetrievalPlan, filterFocusedMessages, type RetrievalPlan } from "./retrieval/planner.js";
 import { makeModelRetrievalPlan, type ModelRetrievalPlan } from "./retrieval/modelPlanner.js";
-import { fetchChannelHistory, formatSlackMessages, SlackContextError } from "./skills/slack.js";
+import { fetchChannelHistory, formatSlackMessages, hasSlackUserToken, searchSlackMessages, SlackContextError } from "./skills/slack.js";
 import { loadCustomers, loadSystemPrompt } from "./config.js";
 import type { AgentReply, AgentRequest } from "./connectors/types.js";
 
@@ -19,6 +19,23 @@ function isExpectedLarkError(error: unknown) {
   ].includes(error.name);
 }
 
+function explicitSlackNeed(text: string, plan: RetrievalPlan, modelPlan: ModelRetrievalPlan) {
+  if (modelPlan.useSlack) return true;
+  if (plan.channels.length > 0) return true;
+  if (plan.intent === "keyword_search" || plan.intent === "todo_or_open_questions" || plan.intent === "person_said") return true;
+  return /(slack|channel|客户|customer|seedance|bad case|case|未回复|没回|todo|待办|ceo|cto|founder)/i.test(text);
+}
+
+function slackSearchQuery(userText: string, plan: RetrievalPlan, modelPlan: ModelRetrievalPlan) {
+  const query = [
+    ...plan.keywords,
+    ...plan.personAliases,
+    modelPlan.searchQuery && modelPlan.searchQuery !== userText ? modelPlan.searchQuery : ""
+  ].filter(Boolean).join(" ").trim();
+
+  return query || userText;
+}
+
 export async function answerLewisQuestionWithDebug(request: string | AgentRequest) {
   const agentRequest = typeof request === "string" ? { text: request, source: "cli" as const } : request;
   const userText = agentRequest.text;
@@ -31,6 +48,7 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
   };
   const needsLarkContext = plan.needsLarkContext || larkTools.chat || larkTools.minutes || larkTools.docs;
   const larkSearchQuery = modelPlan.searchQuery || userText;
+  const shouldSearchSlackWorkspace = hasSlackUserToken() && plan.channels.length === 0 && explicitSlackNeed(userText, plan, modelPlan);
 
   const chunks: string[] = [];
   const retrievalNotes: string[] = [`Model planner: ${modelPlan.reason}`];
@@ -66,6 +84,36 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
       }
 
       throw error;
+    }
+  }
+
+  if (shouldSearchSlackWorkspace) {
+    const query = slackSearchQuery(userText, plan, modelPlan);
+
+    try {
+      const messages = await searchSlackMessages({
+        query,
+        limit: Math.min(50, plan.limit)
+      });
+      const focusedMessages = filterFocusedMessages(messages, plan);
+
+      retrievalNotes.push(`Slack search: ${messages.length} matches, ${focusedMessages.length} focused matches, query="${query}"`);
+      chunks.push([
+        "Slack workspace search:",
+        `Query: ${query}`,
+        `Match count: ${messages.length}`,
+        focusedMessages.length > 0 ? formatSlackMessages(focusedMessages) : "(No focused Slack search matches.)"
+      ].join("\n"));
+    } catch (error) {
+      if (error instanceof SlackContextError) {
+        retrievalNotes.push(`Slack search failed (${error.code})`);
+        chunks.push([
+          "Slack workspace search:",
+          `Retrieval error: ${error.message}`
+        ].join("\n"));
+      } else {
+        throw error;
+      }
     }
   }
 
@@ -105,6 +153,7 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
   const planSummary = [
     `Intent: ${plan.intent}`,
     `Channels: ${plan.channels.join(", ") || "(none)"}`,
+    `Slack workspace search: ${shouldSearchSlackWorkspace ? "yes" : "no"}`,
     `Limit per channel: ${plan.limit}`,
     `Time filter: ${plan.oldest ? "today" : "recent"}`,
     `Keywords: ${plan.keywords.join(", ") || "(none)"}`,

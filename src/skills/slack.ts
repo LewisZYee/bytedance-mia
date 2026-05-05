@@ -2,6 +2,7 @@ import { ErrorCode, WebClient } from "@slack/web-api";
 import type { WebAPICallError } from "@slack/web-api";
 
 export const slackClient = new WebClient(process.env.SLACK_BOT_TOKEN);
+const slackUserClient = process.env.SLACK_USER_TOKEN ? new WebClient(process.env.SLACK_USER_TOKEN) : undefined;
 
 export type SlackContextMessage = {
   channelId: string;
@@ -12,6 +13,7 @@ export type SlackContextMessage = {
   threadTs?: string;
   isThreadReply: boolean;
   replyCount: number;
+  permalink?: string;
 };
 
 export type SlackChannelRef = {
@@ -31,6 +33,11 @@ type SlackRawMessage = {
   ts?: string;
   thread_ts?: string;
   reply_count?: number;
+  permalink?: string;
+  channel?: {
+    id?: string;
+    name?: string;
+  };
 };
 
 export class SlackContextError extends Error {
@@ -86,6 +93,14 @@ function explainSlackApiError(action: string, error: unknown, details?: Record<s
   throw error;
 }
 
+function historyClient() {
+  return slackUserClient || slackClient;
+}
+
+export function hasSlackUserToken() {
+  return Boolean(slackUserClient);
+}
+
 function normalizeMessage(
   message: SlackRawMessage,
   channel: SlackChannelRef,
@@ -105,6 +120,7 @@ function normalizeMessage(
     ...(channel.name ? { channelName: channel.name } : {}),
     ...(message.user || message.bot_id || message.username ? { userId: message.user || message.bot_id || message.username } : {}),
     ...(threadTs ? { threadTs } : {}),
+    ...(message.permalink ? { permalink: message.permalink } : {}),
     isThreadReply,
     replyCount: message.reply_count ?? 0
   };
@@ -122,7 +138,7 @@ export async function resolveChannel(input: string) {
 
   try {
     do {
-      const result = await slackClient.conversations.list({
+      const result = await historyClient().conversations.list({
         types: "public_channel,private_channel",
         limit: 1000,
         ...(cursor ? { cursor } : {})
@@ -145,7 +161,7 @@ export async function resolveChannel(input: string) {
   }
 
   throw new SlackContextError(
-    `Cannot resolve Slack channel: ${input}. Make sure the bot can see the channel and has channels:read/groups:read as needed.`,
+    `Cannot resolve Slack channel: ${input}. Make sure the Slack token can see the channel and has channels:read/groups:read as needed.`,
     "cannot_resolve_channel",
     { channel: input }
   );
@@ -164,7 +180,7 @@ export async function fetchChannelHistory(params: {
 
   try {
     do {
-      const result = await slackClient.conversations.history({
+      const result = await historyClient().conversations.history({
         channel: channel.id,
         limit: Math.min(200, Math.max(1, limit - messages.length)),
         ...(params.oldest ? { oldest: params.oldest } : {}),
@@ -208,7 +224,7 @@ export async function fetchThreadReplies(
 
   try {
     do {
-      const result = await slackClient.conversations.replies({
+      const result = await historyClient().conversations.replies({
         channel: channel.id,
         ts: threadTs,
         limit: Math.min(200, Math.max(1, limit - replies.length)),
@@ -234,12 +250,59 @@ export async function fetchThreadReplies(
   return replies;
 }
 
+function normalizeSearchMatch(match: SlackRawMessage): SlackContextMessage | undefined {
+  const channelId = match.channel?.id;
+  if (!channelId || !match.ts || typeof match.text !== "string") return undefined;
+
+  return normalizeMessage({
+    ...match,
+    type: "message"
+  }, {
+    id: channelId,
+    ...(match.channel?.name ? { name: match.channel.name } : {})
+  });
+}
+
+export async function searchSlackMessages(params: {
+  query: string;
+  limit?: number;
+}): Promise<SlackContextMessage[]> {
+  if (!slackUserClient) {
+    throw new SlackContextError(
+      "Slack workspace search requires SLACK_USER_TOKEN.",
+      "slack_user_token_required"
+    );
+  }
+
+  const limit = Math.min(100, Math.max(1, params.limit ?? 20));
+
+  try {
+    const result = await slackUserClient.search.messages({
+      query: params.query,
+      count: limit,
+      sort: "timestamp",
+      sort_dir: "desc"
+    });
+
+    const matches = (result.messages?.matches ?? []) as SlackRawMessage[];
+    return matches
+      .map(normalizeSearchMatch)
+      .filter((message): message is SlackContextMessage => Boolean(message));
+  } catch (error) {
+    explainSlackApiError("Search Slack messages", error, { query: params.query });
+  }
+
+  return [];
+}
+
 export function formatSlackMessages(messages: SlackContextMessage[]) {
   return messages
     .map((m) => {
       const who = m.userId || "unknown";
       const thread = m.isThreadReply && m.threadTs ? ` thread=${m.threadTs}` : "";
-      return `[${m.ts}] ${who}${thread}: ${m.text}`;
+      const channel = m.channelName ? ` #${m.channelName}` : "";
+      const link = m.permalink ? ` link=${m.permalink}` : "";
+      return `[${m.ts}]${channel} ${who}${thread}${link}: ${m.text}`;
     })
     .join("\n");
 }
