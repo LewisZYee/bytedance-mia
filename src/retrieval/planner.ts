@@ -168,16 +168,16 @@ function includesAny(text: string, keywords: string[]) {
 }
 
 function shouldSearchLark(text: string) {
-  return /(lark|飞书|文档|doc|docs|会议|纪要|妙记|minutes|meeting|transcript|聊天记录|群聊|私聊)/i.test(text);
+  return /(lark|飞书|feishu|妙记|飞书文档|飞书群|飞书聊天|飞书私聊|飞书会议|lark docs?|lark minutes?)/i.test(text);
 }
 
 function larkToolHints(text: string) {
   const lower = text.toLowerCase();
 
   return {
-    chat: /(lark|飞书|聊天记录|群聊|私聊|消息|message|chat)/i.test(text),
-    minutes: /(会议|纪要|妙记|minutes|meeting|transcript|录音|总结|待办)/i.test(text),
-    docs: /(文档|doc|docs|wiki|知识库|prd|spec|report|报告|方案|资料)/i.test(lower)
+    chat: /(lark|飞书|feishu).*(聊天|群聊|私聊|消息|message|chat)|(聊天|群聊|私聊|消息|message|chat).*(lark|飞书|feishu)/i.test(text),
+    minutes: /(妙记|lark minutes?|飞书会议|飞书纪要|飞书.*transcript)/i.test(text),
+    docs: /(飞书文档|lark docs?|飞书.*wiki|飞书.*知识库|飞书.*资料)/i.test(lower)
   };
 }
 

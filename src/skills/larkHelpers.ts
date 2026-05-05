@@ -1,4 +1,4 @@
-import { createLarkClient, userTokenOption, assertLarkOk } from "../services/larkClient.js";
+import { createLarkClient, userTokenOption, assertLarkOk, LarkApiError } from "../services/larkClient.js";
 import { getLarkUserAccessToken } from "../services/larkAuth.js";
 
 export type LarkListResponse<T> = {
@@ -22,15 +22,40 @@ export async function userRequest<T>(payload: {
 }) {
   const client = createLarkClient();
   const token = await getLarkUserAccessToken();
-  const response = await client.request<T>({
-    method: payload.method,
-    url: `${client.domain}${payload.path}`,
-    ...(payload.data ? { data: payload.data } : {}),
-    ...(payload.params ? { params: payload.params } : {})
-  }, userTokenOption(token));
 
-  assertLarkOk(response as { code?: number; msg?: string });
-  return response;
+  try {
+    const response = await client.request<T>({
+      method: payload.method,
+      url: `${client.domain}${payload.path}`,
+      ...(payload.data ? { data: payload.data } : {}),
+      ...(payload.params ? { params: payload.params } : {})
+    }, userTokenOption(token));
+
+    assertLarkOk(response as { code?: number; msg?: string });
+    return response;
+  } catch (error) {
+    const maybe = error as {
+      response?: {
+        status?: number;
+        data?: {
+          code?: number;
+          msg?: string;
+        };
+      };
+    };
+    const status = maybe.response?.status;
+    const code = maybe.response?.data?.code;
+    const msg = maybe.response?.data?.msg;
+
+    if (status || code || msg) {
+      throw new LarkApiError(
+        msg || `Lark API request failed${status ? ` with HTTP ${status}` : ""}.`,
+        code
+      );
+    }
+
+    throw error;
+  }
 }
 
 export function stripHighlight(text?: string) {

@@ -13,10 +13,15 @@ export type AgentDebugInfo = {
 
 function isExpectedLarkError(error: unknown) {
   return error instanceof Error && [
+    "LarkApiError",
     "LarkNotConfiguredError",
     "LarkSkillNotConfiguredError",
     "LarkUserAuthRequiredError"
   ].includes(error.name);
+}
+
+function explicitLarkNeed(text: string) {
+  return /(lark|飞书|feishu|妙记|飞书文档|飞书群|飞书聊天|飞书私聊|飞书会议|lark docs?|lark minutes?)/i.test(text);
 }
 
 function explicitSlackNeed(text: string, plan: RetrievalPlan, modelPlan: ModelRetrievalPlan) {
@@ -41,12 +46,20 @@ export async function answerLewisQuestionWithDebug(request: string | AgentReques
   const userText = agentRequest.text;
   const plan = makeRetrievalPlan(userText, loadCustomers());
   const modelPlan = await makeModelRetrievalPlan(userText);
-  const larkTools = {
+  const rawLarkTools = {
     chat: plan.larkTools.chat || modelPlan.useLarkChat,
     minutes: plan.larkTools.minutes || modelPlan.useLarkMinutes,
     docs: plan.larkTools.docs || modelPlan.useLarkDocs
   };
-  const needsLarkContext = plan.needsLarkContext || larkTools.chat || larkTools.minutes || larkTools.docs;
+  const allowLarkRetrieval = agentRequest.source === "lark"
+    ? plan.needsLarkContext || rawLarkTools.chat || rawLarkTools.minutes || rawLarkTools.docs
+    : explicitLarkNeed(userText);
+  const larkTools = {
+    chat: allowLarkRetrieval && rawLarkTools.chat,
+    minutes: allowLarkRetrieval && rawLarkTools.minutes,
+    docs: allowLarkRetrieval && rawLarkTools.docs
+  };
+  const needsLarkContext = allowLarkRetrieval && (plan.needsLarkContext || larkTools.chat || larkTools.minutes || larkTools.docs);
   const larkSearchQuery = modelPlan.searchQuery || userText;
   const shouldSearchSlackWorkspace = hasSlackUserToken() && plan.channels.length === 0 && explicitSlackNeed(userText, plan, modelPlan);
 
